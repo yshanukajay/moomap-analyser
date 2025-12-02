@@ -1,2 +1,1 @@
-# moomap-analyser
-moomap-analyser
+# Cattle Identification Backend (Python + Flask)
