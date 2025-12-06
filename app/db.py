@@ -1,31 +1,11 @@
-# MongoDB connection setup
-from flask import current_app
+# app/db.py
 from pymongo import MongoClient
+import os
 
-def init_db(app):
-    """
-    Initialize MongoDB connection and attach client & database to Flask app.
-    """
-    try:
-        client = MongoClient(app.config['MONGODB_URI'])
-        
-        # Use the database from URI, or default to 'moomap'
-        db = client.get_default_database()
-        if db is None:
-            # If URI does not specify DB, default to 'moomap'
-            db = client['moomap']
-
-        app.mongo_client = client
-        app.db = db
-
-        print(f"[INFO] Connected to MongoDB database: {db.name}")
-
-    except Exception as e:
-        print("[ERROR] Failed to connect to MongoDB:", e)
-        raise e
+MONGO_URI = os.getenv('MONGO_URI', 'mongodb://admin:A9fT3xPq@213.199.51.193:27017/moomap?authSource=admin')
+DB_NAME = os.getenv('DB_NAME', 'moomap')
 
 def get_db():
-    """
-    Get the MongoDB database instance from the current Flask app context.
-    """
-    return current_app.db
+    client = MongoClient(MONGO_URI)
+    db = client[DB_NAME]
+    return db

@@ -1,67 +1,64 @@
-from app.db import get_db
+# app/ai/preprocessing.py
 import pandas as pd
+import numpy as np
 from geopy.distance import geodesic
-from datetime import datetime
 
-def fetch_device_data(device_id, limit=1000):
-    """
-    Fetch latest N data points for a device from MongoDB
-    """
-    db = get_db()
-    collection = db[f"dev_{device_id}"]
-    data = list(collection.find().sort("_id", -1).limit(limit))
-    if not data:
-        return pd.DataFrame()  # return empty dataframe if no data
-
-    # Normalize into DataFrame
-    df = pd.DataFrame([
-        {
-            "timestamp": doc["_id"].generation_time,
-            "lat": doc["gps"]["lat"],
-            "lon": doc["gps"]["lon"],
-            "battery_percent": doc["battery"]["percent"],
-            "voltage": doc["battery"]["voltage"]
-        }
-        for doc in data
-    ])
-
-    df = df.sort_values("timestamp")  # sort chronologically
-    df.reset_index(drop=True, inplace=True)
+def docs_to_dataframe(docs): 
+    rows = []
+    for d in docs:
+        gps = d.get('gps', {})
+        battery = d.get('battery', {})
+        lat = gps.get('lat', np.nan)
+        lon = gps.get('lon', np.nan)
+        percent = battery.get('percent', np.nan)
+        voltage = battery.get('voltage', np.nan)
+        ts = battery.get('ts_ms', None)
+        rows.append({
+            'device_id': d.get('device_id'),
+            'lat': float(lat) if lat is not None else np.nan,
+            'lon': float(lon) if lon is not None else np.nan,
+            'battery_percent': float(percent) if percent is not None else np.nan,
+            'battery_voltage': float(voltage) if voltage is not None else np.nan,
+            'ts_ms': int(ts) if ts is not None else None
+        })
+    df = pd.DataFrame(rows)
+    df = df.dropna(subset=['lat', 'lon', 'battery_percent', 'battery_voltage'])
+    df = df.sort_values(['device_id', 'ts_ms']).reset_index(drop=True)
     return df
 
 
-def compute_movement_features(df):
-    """
-    Compute distance, speed, and inactivity based on GPS coordinates
-    """
-    distances = []
-    speeds = []
-
-    for i in range(len(df)):
-        if i == 0:
-            distances.append(0)
-            speeds.append(0)
-        else:
-            prev = (df.loc[i-1, "lat"], df.loc[i-1, "lon"])
-            curr = (df.loc[i, "lat"], df.loc[i, "lon"])
-            distance_m = geodesic(prev, curr).meters
-            time_diff_s = (df.loc[i, "timestamp"] - df.loc[i-1, "timestamp"]).total_seconds()
-            speed_m_s = distance_m / time_diff_s if time_diff_s > 0 else 0
-            distances.append(distance_m)
-            speeds.append(speed_m_s)
-
-    df["distance_m"] = distances
-    df["speed_m_s"] = speeds
-    df["idle"] = df["speed_m_s"] < 0.1  # mark very slow movements as idle
+def add_derived_features(df):
+    df['speed_m_s'] = np.nan
+    df['battery_drop_per_s'] = 0.0
+    for dev, group in df.groupby('device_id'):
+        group = group.sort_values('ts_ms')
+        speeds, drops = [], []
+        prev = None
+        for _, row in group.iterrows():
+            if prev is None:
+                speeds.append(0.0)
+                drops.append(0.0)
+            else:
+                prev_coord = (prev['lat'], prev['lon'])
+                cur_coord = (row['lat'], row['lon'])
+                try:
+                    dist_m = geodesic(prev_coord, cur_coord).meters
+                except:
+                    dist_m = 0.0
+                dt = max(1, (row['ts_ms'] - prev['ts_ms']) / 1000.0)
+                speed = dist_m / dt
+                battery_drop = max(0.0, prev['battery_percent'] - row['battery_percent']) / dt
+                speeds.append(speed)
+                drops.append(battery_drop)
+            prev = row
+        df.loc[group.index, 'speed_m_s'] = speeds
+        df.loc[group.index, 'battery_drop_per_s'] = drops
+    df['speed_m_s'] = df['speed_m_s'].replace([np.inf, -np.inf], 0.0)
+    df['battery_drop_per_s'] = df['battery_drop_per_s'].replace([np.inf, -np.inf], 0.0)
     return df
 
-
-def prepare_features(device_id, limit=1000):
-    """
-    Full pipeline: fetch, clean, and compute features
-    """
-    df = fetch_device_data(device_id, limit)
-    if df.empty:
-        return df
-    df = compute_movement_features(df)
-    return df
+def prepare_features(df, feature_cols=None):
+    if feature_cols is None:
+        feature_cols = ['lat', 'lon', 'battery_percent', 'battery_voltage', 'speed_m_s', 'battery_drop_per_s']
+    X = df[feature_cols].values
+    return X, feature_cols
